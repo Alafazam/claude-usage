@@ -33,7 +33,7 @@ Captures usage from:
 ## Requirements
 
 - Python 3.8+
-- No third-party packages — uses only the standard library (`sqlite3`, `http.server`, `json`, `pathlib`)
+- No third-party packages — uses only the standard library (`sqlite3`, `http.server`, `json`, `pathlib`, and for team mode `secrets`, `hashlib`, `urllib`, `configparser`)
 
 > Anyone running Claude Code already has Python installed.
 
@@ -126,6 +126,83 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 ---
 
+## Team mode
+
+Team mode lets a team lead see **adoption and volume across many developers** on a self-hosted server — model mix, token volume, tool usage, MCP-server usage, and per-project/per-person breakdowns — **without any prompt text, code, or thinking text ever leaving a developer's machine.**
+
+There are three modes; **local mode (above) is the default and is unchanged**:
+
+| Mode | Command | What it does |
+|------|---------|--------------|
+| local | `dashboard` / `scan` / … | Scan → local SQLite → local dashboard. Nothing leaves the machine. |
+| agent | `push` / `agent` | Scan locally, then push **metrics only** to a team server with an access key. |
+| team-server | `team-server` | Receive metrics from many agents, store per-user, serve manager dashboards + access-key management. |
+
+### Privacy contract — what crosses the wire
+
+Per-turn **metrics only**:
+
+- ✅ Sent: `model`, input/output/cache token counts, `timestamp`, `message_id`, `tool_name`, `session_id`, `project_name` **(basename only — the last path component)**, plus an `install_uuid` and your declared email.
+- ❌ **Never sent:** prompt text, code, thinking text, full `cwd`, or git branch.
+
+A `metrics.assert_no_forbidden_fields` guard runs on the client **before every push** and again on the server at ingest, rejecting any payload that carries a non-whitelisted field. A regression test asserts the serialized payload contains none of the forbidden fields.
+
+### Identity
+
+The manager generates **one access key per developer** (a `clu_…` string, keyed to an email). Keys are stored only as a sha256 hash and shown once on creation. On every request the server resolves the key → canonical email; a client-asserted email must match the key's email or the request is rejected. A developer therefore cannot report as anyone but themselves.
+
+### Running a team server
+
+```
+# Bootstrap an admin access key on first run (local auth mode), then serve.
+CLAUDE_USAGE_ADMIN_KEY=clu_pick_a_strong_secret python cli.py team-server
+# Manager dashboard:   http://localhost:8080/
+# Access-key admin UI: http://localhost:8080/admin/keys
+```
+
+The server DB lives at `~/.claude/team-usage.db` (SQLite + WAL, separate from the local `usage.db`). Generate per-developer keys from the **/admin/keys** page (enter emails, click generate — each raw key is shown once), or headlessly:
+
+```
+python cli.py key create --email alice@example.com,bob@example.com
+python cli.py key list
+python cli.py key revoke --key-id 3
+```
+
+**Server configuration (environment):**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `HOST` / `PORT` | `localhost` / `8080` | Bind address. |
+| `CLAUDE_USAGE_AUTH_MODE` | `local` | `local` = admin logs into the UI with their access key; `proxy` = trust a reverse-proxy SSO header. |
+| `CLAUDE_USAGE_ADMIN_KEY` | — | (local mode) bootstraps an admin access key; idempotent across restarts. |
+| `CLAUDE_USAGE_ADMIN_EMAILS` | — | (proxy mode) comma-separated emails granted admin. |
+| `CLAUDE_USAGE_SSO_HEADER` | `X-Forwarded-Email` | (proxy mode) header the proxy sets with the authenticated email. |
+
+> **HTTPS is required for any non-localhost deployment** — the access key travels in the `Authorization` header. **Proxy mode trusts the SSO header blindly**, so enable it only behind a proxy (oauth2-proxy, Authelia, a corporate IdP) that authenticates the user and *strips any client-supplied copy* of that header.
+
+### Running an agent (each developer)
+
+Set the server URL, your access key, and your email — in `~/.claude/team.conf` or via environment variables — then push:
+
+```ini
+# ~/.claude/team.conf
+[team]
+server_url = https://team.example.com
+key = clu_your_key_here
+email = alice@example.com
+```
+
+```
+python cli.py push     # scan + push once (good for cron)
+python cli.py agent     # scan + push every 5 minutes until stopped
+```
+
+Environment overrides (handy for CI / secret managers): `CLAUDE_USAGE_SERVER_URL`, `CLU_KEY`, `CLU_EMAIL`. The agent generates a stable `install_uuid` once and tracks a push watermark, so re-runs are incremental and **idempotent** — re-pushing the same turns changes nothing.
+
+> **Cost in team mode is API-equivalent only**, computed from token counts at API list prices (see below). It is not a real subscription cost.
+
+---
+
 ## Cost estimates
 
 Costs are calculated using **Anthropic API pricing as of June 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
@@ -168,8 +245,13 @@ See [vscode-extension/README.md](vscode-extension/README.md) for settings, comma
 | File | Purpose |
 |------|---------|
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
-| `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
-| `cli.py` | `scan`, `today`, `stats`, `dashboard` commands |
+| `dashboard.py` | HTTP server + single-page HTML/JS dashboard (local mode) |
+| `cli.py` | `scan`, `today`, `week`, `stats`, `dashboard` + team-mode commands |
+| `metrics.py` | Pure metrics-only payload extraction + privacy guard (team mode) |
+| `server_db.py` | Team-server SQLite schema + manager queries |
+| `auth.py` | Access-key lifecycle + request authentication (team mode) |
+| `team_server.py` | Team aggregation server: ingest, admin/manager endpoints, UI |
+| `agent.py` | Team-mode client: scan + push metrics to the server |
 | `Formula/claude-usage.rb` | Homebrew formula — install with `brew install --formula <raw-url>` |
 | `vscode-extension/` | VS Code extension — embeds the dashboard inside VS Code |
 | `Dockerfile` | Container image definition |

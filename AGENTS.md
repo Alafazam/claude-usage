@@ -6,11 +6,19 @@ Guidance for any coding agent (Codex, Claude Code, etc.) working on this reposit
 
 ## Project shape
 
-Three Python files, stdlib only, no `pip install` step. Python 3.8+.
+Stdlib only, no `pip install` step. Python 3.8+.
 
+**Local mode** (default; scan local transcripts → local DB → local dashboard):
 - [scanner.py](scanner.py) — parses Claude Code JSONL transcripts into a SQLite DB at `~/.claude/usage.db`.
-- [cli.py](cli.py) — terminal commands (`scan` / `today` / `week` / `stats` / `dashboard`).
+- [cli.py](cli.py) — terminal commands (`scan` / `today` / `week` / `stats` / `dashboard`, plus the team-mode commands below).
 - [dashboard.py](dashboard.py) — single-file `http.server` serving an embedded HTML/JS SPA on `localhost:8080`.
+
+**Team mode** (opt-in; agents push metrics-only to a self-hosted server — see the Team mode section in [README.md](README.md)):
+- [metrics.py](metrics.py) — pure metrics-only payload extraction + the forbidden-field privacy guard. No prompt/code/thinking text, full cwd, or git branch ever ships.
+- [server_db.py](server_db.py) — team-server schema (`~/.claude/team-usage.db`, WAL), dedup on `(user_id, message_id)`, manager queries.
+- [auth.py](auth.py) — `clu_`-prefixed access keys (sha256-hashed, shown once); identity derived server-side from the key.
+- [team_server.py](team_server.py) — aggregation server: `/api/ingest`, admin/manager endpoints, embedded manager dashboard + access-key UI.
+- [agent.py](agent.py) — client: scan + push with an idempotent id watermark; one-shot `push` and looped `agent`.
 
 Use `python` on Windows, `python3` on macOS/Linux. Both work the same.
 

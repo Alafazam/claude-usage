@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.6.0 — TBD
+
+### Team mode
+
+- Added an opt-in **team mode** alongside the existing local mode: a metrics-only agent that pushes usage to a self-hosted aggregation server, and a manager-facing server with per-person and org-wide dashboards. No prompt text, code, thinking text, full `cwd`, or git branch ever leaves a developer's machine — a privacy guard (`metrics.assert_no_forbidden_fields`) runs on the client before every push and on the server at ingest, and is asserted by a regression test. Stdlib only, no new runtime dependencies.
+- New modules: `metrics.py` (pure payload extraction + guard), `server_db.py` (team-server schema, dedup on `(user_id, message_id)`, manager queries), `auth.py` (`clu_`-prefixed access keys, sha256-hashed, shown once; identity derived server-side from the key), `team_server.py` (ingest + admin/manager endpoints + embedded dashboard & access-key UI), `agent.py` (scan + push with an idempotent watermark).
+- New CLI commands: `push` (scan + push once), `agent` (scan + push every 5 minutes), `team-server` (run the aggregation server), and `key create|list|revoke` (headless access-key management). Existing `scan`/`today`/`week`/`stats`/`dashboard` commands and the local DB are unchanged.
+- Manager dashboards surface adoption (active developers and a "who hasn't reported" nudge list), token volume over time, model mix, tool frequency, MCP-server usage, per-project breakdown, an activity-by-hour view, and a developer leaderboard with per-person drill-down. Cost is **API-equivalent only**.
+- Access-key creation lives in the team-server web UI (`/admin/keys`); a developer's declared email is verified against the access key's canonical email on every ingest, so no one can report as someone else. Optional SSO via a trusted reverse-proxy header (`CLAUDE_USAGE_AUTH_MODE=proxy`).
+
 ## v1.5.0 — 2026-06-21
 
 ### Dashboard

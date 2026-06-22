@@ -1,8 +1,10 @@
 """Tests for cli.py - pricing, formatting, and cost calculation."""
 
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest import mock
 import cli
 from cli import get_pricing, calc_cost, fmt, fmt_cost, PRICING
@@ -213,6 +215,82 @@ class TestDashboardNoBrowser(unittest.TestCase):
             cli.cmd_dashboard(host="127.0.0.1", port=9999, no_browser=True)
             mock_open.assert_not_called()
             mock_serve.assert_called_once()
+
+
+class TestTeamCommandsRegistered(unittest.TestCase):
+    def test_new_commands_present(self):
+        for command in ("push", "agent", "team-server", "key"):
+            self.assertIn(command, cli.COMMANDS)
+
+
+class TestPushCommand(unittest.TestCase):
+    def test_push_reports_result(self):
+        with mock.patch("agent.scan_and_push",
+                        return_value={"received": 3, "inserted": 2, "deduped": 1}), \
+             redirect_stdout(io.StringIO()) as out:
+            cli.cmd_push()
+        self.assertIn("received=3", out.getvalue())
+        self.assertIn("inserted=2", out.getvalue())
+
+    def test_push_failure_exits_nonzero(self):
+        import agent
+        with mock.patch("agent.scan_and_push", side_effect=agent.PushError("boom")), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.cmd_push()
+
+
+class TestKeyCommand(unittest.TestCase):
+    def setUp(self):
+        import server_db
+        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmpfile.close()
+        self.db_path = Path(self.tmpfile.name)
+        self._orig = server_db.DB_PATH
+        server_db.DB_PATH = self.db_path
+
+    def tearDown(self):
+        import server_db
+        server_db.DB_PATH = self._orig
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(str(self.db_path) + suffix)
+            if p.exists():
+                p.unlink()
+
+    def test_create_list_revoke(self):
+        import auth
+        import server_db
+
+        with redirect_stdout(io.StringIO()) as out:
+            cli.cmd_key(["create", "--email", "a@x.com"])
+        printed = out.getvalue()
+        self.assertIn("a@x.com", printed)
+        self.assertIn("clu_", printed)
+
+        # The created key actually resolves.
+        conn = server_db.get_conn(self.db_path)
+        raw = printed.split("clu_", 1)
+        raw = "clu_" + raw[1].split()[0]
+        self.assertIsNotNone(auth.lookup_key(conn, raw))
+
+        with redirect_stdout(io.StringIO()) as out:
+            cli.cmd_key(["list"])
+        self.assertIn("a@x.com", out.getvalue())
+
+        key_id = auth.lookup_key(conn, raw)["key_id"]
+        conn.close()
+        with redirect_stdout(io.StringIO()) as out:
+            cli.cmd_key(["revoke", "--key-id", str(key_id)])
+        self.assertIn("Revoked", out.getvalue())
+
+        conn = server_db.get_conn(self.db_path)
+        self.assertIsNone(auth.lookup_key(conn, raw))
+        conn.close()
+
+    def test_create_requires_email(self):
+        with redirect_stdout(io.StringIO()) as out:
+            cli.cmd_key(["create"])
+        self.assertIn("requires --email", out.getvalue())
 
 
 if __name__ == "__main__":

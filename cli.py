@@ -429,12 +429,84 @@ def cmd_dashboard(projects_dir=None, host=None, port=None, no_browser=False, sur
     serve(host=host, port=port, surface=surface)
 
 
+# ── Team mode ───────────────────────────────────────────────────────────────────
+
+def cmd_push():
+    """One-shot: scan locally, then push metrics-only to the team server."""
+    import agent
+    try:
+        result = agent.scan_and_push()
+        print("Pushed: received=%d inserted=%d deduped=%d" %
+              (result["received"], result["inserted"], result["deduped"]))
+    except agent.PushError as e:
+        print("Push failed: %s" % e)
+        sys.exit(1)
+
+
+def cmd_agent():
+    """Run the push loop on a fixed cadence until interrupted."""
+    import agent
+    agent.run_agent_loop()
+
+
+def cmd_team_server(host=None, port=None):
+    """Run the team aggregation server."""
+    from team_server import serve_team
+    serve_team(host=host, port=port)
+
+
+def cmd_key(args):
+    """Headless access-key management (the team-server UI is the primary path)."""
+    import auth
+    import server_db
+
+    if not args:
+        print("Usage: key create --email a@x.com[,b@x.com] [--label L] [--admin]")
+        print("       key list")
+        print("       key revoke --key-id N")
+        return
+
+    sub = args[0]
+    conn = server_db.get_conn(server_db.DB_PATH)
+    server_db.init_server_db(conn)
+    try:
+        if sub == "create":
+            emails_arg = parse_named_arg(args, "--email")
+            if not emails_arg:
+                print("key create requires --email a@x.com[,b@x.com]")
+                return
+            emails = [e.strip() for e in emails_arg.split(",") if e.strip()]
+            created = auth.create_keys(
+                conn, emails,
+                label=parse_named_arg(args, "--label"),
+                is_admin="--admin" in args,
+            )
+            for c in created:
+                print("%s\t%s" % (c["email"], c["key"]))
+            print("\nStore these now — access keys are shown only once.")
+        elif sub == "list":
+            for k in auth.list_keys(conn):
+                print("%-5s %-30s %-8s last_seen=%s" %
+                      (k["key_id"], k["email"], k["status"], k["last_seen_at"] or "-"))
+        elif sub == "revoke":
+            key_id = parse_named_arg(args, "--key-id")
+            if not key_id:
+                print("key revoke requires --key-id N")
+                return
+            auth.revoke_key(conn, int(key_id))
+            print("Revoked key %s" % key_id)
+        else:
+            print("Unknown key subcommand: %s" % sub)
+    finally:
+        conn.close()
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 USAGE = """
 Claude Code Usage Dashboard
 
-Usage:
+Local mode:
   python cli.py scan [--projects-dir PATH]   Scan JSONL files and update database
   python cli.py today                        Show today's usage summary
   python cli.py week                         Show last 7 days (per-day + by-model)
@@ -442,6 +514,15 @@ Usage:
   python cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT] [--no-browser] [--surface SURFACE]
                                                  Scan + start dashboard (opens a browser unless --no-browser)
   python cli.py --version                    Print the version and exit
+
+Team mode (metrics only — no prompt/code/thinking text ever leaves the machine):
+  python cli.py push                         Scan + push usage once to the team server
+  python cli.py agent                        Scan + push on a loop (every 5 minutes)
+  python cli.py team-server [--host HOST] [--port PORT]
+                                                 Run the aggregation server + manager dashboards
+  python cli.py key create --email a@x.com[,b@x.com] [--label L] [--admin]
+  python cli.py key list
+  python cli.py key revoke --key-id N        Headless access-key management
 """
 
 COMMANDS = {
@@ -450,6 +531,10 @@ COMMANDS = {
     "week": cmd_week,
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,
+    "push": cmd_push,
+    "agent": cmd_agent,
+    "team-server": cmd_team_server,
+    "key": cmd_key,
 }
 
 def parse_named_arg(args, flag):
@@ -482,5 +567,12 @@ if __name__ == "__main__":
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
+    elif command == "team-server":
+        cmd_team_server(
+            host=parse_named_arg(rest, "--host"),
+            port=parse_named_arg(rest, "--port"),
+        )
+    elif command == "key":
+        cmd_key(rest)
     else:
         COMMANDS[command]()

@@ -66,6 +66,7 @@ class TeamServerTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
         team_server.DB_PATH = cls._orig_db
         team_server.AUTH_MODE = cls._orig_mode
         os.unlink(cls.db_path)

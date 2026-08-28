@@ -60,7 +60,8 @@ def init_db(conn):
             total_cache_read        INTEGER DEFAULT 0,
             total_cache_creation    INTEGER DEFAULT 0,
             model           TEXT,
-            turn_count      INTEGER DEFAULT 0
+            turn_count      INTEGER DEFAULT 0,
+            topic           TEXT
         );
 
         CREATE TABLE IF NOT EXISTS turns (
@@ -96,6 +97,11 @@ def init_db(conn):
             tool_use_count        INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
         CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp);
         CREATE INDEX IF NOT EXISTS idx_sessions_first ON sessions(first_timestamp);
@@ -111,6 +117,12 @@ def init_db(conn):
     _ensure_column(conn, "turns", "agent_id", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_subagent ON turns(is_subagent)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_agent_id ON turns(agent_id)")
+    # Session topic (from custom-title / ai-title records; added in a later
+    # schema version). The one-time backfill of pre-existing sessions is driven
+    # by scan() via the schema_meta 'topic_backfill_done' marker (not by the
+    # column-add event), so it also covers DBs that gained the column from an
+    # earlier build that predated the backfill.
+    _ensure_column(conn, "sessions", "topic", "TEXT")
     # Conditional unique index: only dedup non-null message IDs
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_message_id
@@ -120,10 +132,93 @@ def init_db(conn):
 
 
 def _ensure_column(conn, table, column, decl):
-    """Add a column to an existing table if it isn't already present."""
+    """Add a column to an existing table if it isn't already present.
+
+    Returns True if the column was just added (an upgrade of an existing DB),
+    False if it was already there (fresh DB or already-migrated).
+    """
     cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        return True
+    return False
+
+
+def _meta_get(conn, key):
+    """Read a value from the schema_meta key/value table (None if absent)."""
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def _meta_set(conn, key, value):
+    """Upsert a value into the schema_meta key/value table."""
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
+        (key, value))
+
+
+def _extract_title(record):
+    """Extract a session title from a custom-title or ai-title record."""
+    rtype = record.get("type")
+    if rtype == "custom-title":
+        return record.get("customTitle")
+    if rtype == "ai-title":
+        return record.get("aiTitle")
+    return None
+
+
+def _backfill_topics(conn, jsonl_files):
+    """One-time backfill of topics for a DB created before topic support.
+
+    Transcript files scanned before the topic column existed are already in
+    processed_files, so an incremental scan skips them and never sees the
+    custom-title / ai-title records they already contain. Re-read just those
+    records (turns are left untouched, so token totals cannot drift) and set the
+    topic for any session that doesn't have one yet. Runs once, gated by a flag
+    in schema_meta (see scan()). Returns the number of sessions filled.
+    """
+    needing = {r["session_id"] for r in conn.execute(
+        "SELECT session_id FROM sessions WHERE topic IS NULL OR topic = ''")}
+    if not needing:
+        return 0
+
+    titles = {}          # session_id -> chosen title
+    has_custom = set()   # sessions whose topic came from a custom-title record
+    for filepath in jsonl_files:
+        try:
+            with open(filepath, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    # Cheap prefilter: only title records carry the substring
+                    # "title" (in their "custom-title" / "ai-title" type), so we
+                    # skip JSON-parsing the ~99% of lines that are turns.
+                    if "title" not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    title = _extract_title(record)
+                    if not title:
+                        continue
+                    sid = record.get("sessionId")
+                    if sid not in needing:
+                        continue
+                    # custom-title wins; ai-title only if no custom-title seen.
+                    if record.get("type") == "custom-title":
+                        titles[sid] = title
+                        has_custom.add(sid)
+                    elif sid not in has_custom:
+                        titles.setdefault(sid, title)
+        except Exception as e:
+            print(f"  Warning: error reading {filepath}: {e}")
+
+    for sid, title in titles.items():
+        conn.execute(
+            "UPDATE sessions SET topic = ? WHERE session_id = ? "
+            "AND (topic IS NULL OR topic = '')", (title, sid))
+    conn.commit()
+    return len(titles)
 
 
 def project_name_from_cwd(cwd):
@@ -244,11 +339,32 @@ def parse_jsonl_file(filepath):
                     continue
 
                 rtype = record.get("type")
-                if rtype not in ("assistant", "user"):
+                if rtype not in ("assistant", "user", "custom-title", "ai-title"):
                     continue
 
                 session_id = record.get("sessionId")
                 if not session_id:
+                    continue
+
+                # Extract session title from title records
+                title = _extract_title(record)
+                if title:
+                    if session_id not in session_meta:
+                        session_meta[session_id] = {
+                            "session_id": session_id,
+                            "project_name": "unknown",
+                            "first_timestamp": "",
+                            "last_timestamp": "",
+                            "git_branch": "",
+                            "model": None,
+                            "topic": None,
+                        }
+                    meta = session_meta[session_id]
+                    # custom-title always wins; ai-title only if no custom-title set
+                    if rtype == "custom-title":
+                        meta["topic"] = title
+                    elif rtype == "ai-title" and not meta.get("topic"):
+                        meta["topic"] = title
                     continue
 
                 if rtype == "user":
@@ -269,6 +385,7 @@ def parse_jsonl_file(filepath):
                         "last_timestamp": timestamp,
                         "git_branch": git_branch,
                         "model": None,
+                        "topic": None,
                     }
                 else:
                     meta = session_meta[session_id]
@@ -378,32 +495,46 @@ def upsert_sessions(conn, sessions):
             (s["session_id"],)
         ).fetchone()
 
+        # A session seen only via a title record (custom-title / ai-title carry a
+        # sessionId but no timestamp) has no real content. Don't let it INSERT a
+        # phantom, token-less row; if the session already exists it still falls
+        # through to the UPDATE below and sets its topic.
+        if existing is None and not s.get("first_timestamp"):
+            continue
+
         if existing is None:
             conn.execute("""
                 INSERT INTO sessions
                     (session_id, project_name, first_timestamp, last_timestamp,
                      git_branch, total_input_tokens, total_output_tokens,
-                     total_cache_read, total_cache_creation, model, turn_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     total_cache_read, total_cache_creation, model, turn_count,
+                     topic)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 s["session_id"], s["project_name"], s["first_timestamp"],
                 s["last_timestamp"], s["git_branch"],
                 s["total_input_tokens"], s["total_output_tokens"],
                 s["total_cache_read"], s["total_cache_creation"],
-                s["model"], s["turn_count"]
+                s["model"], s["turn_count"], s.get("topic")
             ))
         else:
             # Update: add new tokens on top of existing (since we only insert new turns)
             # Keep the highest-priority model (e.g. opus over haiku from subagents)
-            existing_model = conn.execute(
-                "SELECT model FROM sessions WHERE session_id = ?",
+            existing_row = conn.execute(
+                "SELECT model, topic FROM sessions WHERE session_id = ?",
                 (s["session_id"],)
-            ).fetchone()["model"]
+            ).fetchone()
+            existing_model = existing_row["model"]
             new_model = s["model"]
             if _model_priority(new_model) > _model_priority(existing_model):
                 model_to_set = new_model
             else:
                 model_to_set = existing_model
+
+            # Update topic if the new scan found one and the existing is empty
+            new_topic = s.get("topic")
+            existing_topic = existing_row["topic"]
+            topic_to_set = new_topic if new_topic else existing_topic
 
             conn.execute("""
                 UPDATE sessions SET
@@ -413,13 +544,14 @@ def upsert_sessions(conn, sessions):
                     total_cache_read = total_cache_read + ?,
                     total_cache_creation = total_cache_creation + ?,
                     turn_count = turn_count + ?,
-                    model = ?
+                    model = ?,
+                    topic = ?
                 WHERE session_id = ?
             """, (
                 s["last_timestamp"],
                 s["total_input_tokens"], s["total_output_tokens"],
                 s["total_cache_read"], s["total_cache_creation"],
-                s["turn_count"], model_to_set,
+                s["turn_count"], model_to_set, topic_to_set,
                 s["session_id"]
             ))
 
@@ -460,6 +592,19 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
             print(f"Scanning {d} ...")
         jsonl_files.extend(glob.glob(str(d / "**" / "*.jsonl"), recursive=True))
     jsonl_files.sort()
+
+    # One-time topic backfill for DBs whose sessions predate topic support: fill
+    # topics from title records in already-processed transcripts that an
+    # incremental scan would otherwise never revisit. Runs once, gated by the
+    # schema_meta 'topic_backfill_done' marker. It runs before the main loop, so
+    # on a fresh DB the sessions table is still empty and this no-ops; only DBs
+    # with pre-existing untitled sessions do real work.
+    if _meta_get(conn, "topic_backfill_done") != "1":
+        filled = _backfill_topics(conn, jsonl_files)
+        _meta_set(conn, "topic_backfill_done", "1")
+        conn.commit()
+        if verbose and filled:
+            print(f"Backfilled topic for {filled} existing session(s).")
 
     new_files = 0
     updated_files = 0
@@ -524,11 +669,31 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                             continue
 
                         rtype = record.get("type")
-                        if rtype not in ("assistant", "user"):
+                        if rtype not in ("assistant", "user", "custom-title", "ai-title"):
                             continue
 
                         session_id = record.get("sessionId")
                         if not session_id:
+                            continue
+
+                        # Extract session title from title records
+                        title = _extract_title(record)
+                        if title:
+                            if session_id not in new_session_metas:
+                                new_session_metas[session_id] = {
+                                    "session_id": session_id,
+                                    "project_name": "unknown",
+                                    "first_timestamp": "",
+                                    "last_timestamp": "",
+                                    "git_branch": "",
+                                    "model": None,
+                                    "topic": None,
+                                }
+                            meta = new_session_metas[session_id]
+                            if rtype == "custom-title":
+                                meta["topic"] = title
+                            elif rtype == "ai-title" and not meta.get("topic"):
+                                meta["topic"] = title
                             continue
 
                         if rtype == "user":
@@ -548,6 +713,7 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                                 "last_timestamp": timestamp,
                                 "git_branch": record.get("gitBranch", ""),
                                 "model": None,
+                                "topic": None,
                             }
                         else:
                             meta = new_session_metas[session_id]

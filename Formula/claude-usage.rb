@@ -1,12 +1,14 @@
 class ClaudeUsage < Formula
   desc "Token, cost, and session dashboard for Claude Code usage"
   homepage "https://github.com/phuryn/claude-usage"
-  # URL and sha256 pinned to the current main commit (v1.1.0 release).
-  # The project intentionally doesn't tag releases, so this formula needs
-  # to be bumped each release. See CHANGELOG.md for what each commit ships.
-  url "https://github.com/phuryn/claude-usage/archive/256b3e839acbaa2b850345854d77fe8dfd15e44e.tar.gz"
-  version "1.1.0"
-  sha256 "1ee3c31268100d63ca137af253ccfaaba1781e4043d3f5d84e74bcf4ec9c5133"
+  # Pinned to the PREVIOUS release's tag tarball, never this formula's own
+  # release: the formula ships inside the repo it installs, so a self-pointing
+  # sha256 would be uncomputable (the tarball would contain this very hash).
+  # It therefore tracks one release behind by design — bump to the prior tag
+  # each release. See AGENTS.md "Homebrew formula and self-referential SHA".
+  url "https://github.com/phuryn/claude-usage/archive/refs/tags/v1.5.4.tar.gz"
+  version "1.5.4"
+  sha256 "c43337fa785e4e78ecdb6da3ab5b1cb7aa780aad8096790fdf3a152441be5550"
   license "MIT"
   head "https://github.com/phuryn/claude-usage.git", branch: "main"
 
@@ -15,9 +17,13 @@ class ClaudeUsage < Formula
   def install
     libexec.install "cli.py", "scanner.py", "dashboard.py"
 
+    # Reference the versioned interpreter (python3.13): modern python@3.x kegs
+    # only ship "python3.13" in their bin — the unversioned "python3" symlink
+    # lives in libexec/bin, so opt_bin/"python3" doesn't exist and the shim
+    # fails at runtime with "No such file or directory" (#46).
     (bin/"claude-usage").write <<~EOS
       #!/bin/bash
-      exec "#{Formula["python@3.13"].opt_bin}/python3" "#{libexec}/cli.py" "$@"
+      exec "#{Formula["python@3.13"].opt_bin}/python3.13" "#{libexec}/cli.py" "$@"
     EOS
     chmod 0755, bin/"claude-usage"
   end

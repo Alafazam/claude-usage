@@ -88,10 +88,12 @@ class TestGetDashboardData(unittest.TestCase):
         data = get_dashboard_data(db_path=Path("/nonexistent/path/usage.db"))
         self.assertIn("error", data)
 
-    def test_session_id_truncated(self):
+    def test_session_id_sent_in_full(self):
+        # The API returns the full session id; the table truncates it for
+        # display client-side, but the CSV export needs the whole value.
         data = get_dashboard_data(db_path=self.db_path)
         session = data["sessions_all"][0]
-        self.assertEqual(len(session["session_id"]), 8)
+        self.assertEqual(session["session_id"], "sess-abc123")
 
     def test_session_duration_calculated(self):
         data = get_dashboard_data(db_path=self.db_path)

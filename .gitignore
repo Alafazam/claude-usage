@@ -2,5 +2,10 @@ __pycache__/
 server.log
 logs/
 
+# Python packaging build artifacts (uv build / pip / setuptools) — see pyproject.toml
+dist/
+build/
+*.egg-info/
+
 .pr-candidates.md
 /tmp/

@@ -43,11 +43,22 @@ No `pip install`, no virtual environment, no build step.
 
 ### macOS / Linux (Homebrew)
 ```
-brew install --formula https://raw.githubusercontent.com/phuryn/claude-usage/main/Formula/claude-usage.rb
+brew tap phuryn/claude-usage https://github.com/phuryn/claude-usage
+brew install phuryn/claude-usage/claude-usage
 claude-usage dashboard
 ```
 
+> Homebrew has disabled installing a formula from an arbitrary raw URL, so tap the repo first (thanks @adrianlungu for the working incantation in #46).
+
 After install, the `claude-usage` command is on your `PATH` and accepts the same subcommands as `python cli.py` (`scan`, `today`, `stats`, `dashboard`).
+
+### Any OS (uv tool / pipx)
+```
+uv tool install git+https://github.com/phuryn/claude-usage
+claude-usage dashboard
+```
+
+Installs the `claude-usage` command without a clone (works with [`pipx`](https://pipx.pypa.io/) too: `pipx install git+https://github.com/phuryn/claude-usage`). The tool stays dependency-free — this only adds packaging metadata, no third-party runtime deps (#144).
 
 ### macOS / Linux (clone)
 ```
@@ -98,7 +109,10 @@ python cli.py stats
 # Scan + open browser dashboard at http://localhost:8080
 python cli.py dashboard
 
-# Custom host and port via environment variables
+# Custom host and port
+python cli.py dashboard --host 0.0.0.0 --port 9000
+
+# Environment variables are also supported
 HOST=0.0.0.0 PORT=9000 python cli.py dashboard
 
 # Scan a custom projects directory
@@ -122,7 +136,7 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 `scanner.py` parses those files and stores the data in a SQLite database at `~/.claude/usage.db`.
 
-`dashboard.py` serves a single-page dashboard on `localhost:8080` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering and a date-range dropdown with bookmarkable URLs. A sticky section nav jumps between sections, and every chart/table can be collapsed (remembered across reloads). The bind address and port can be overridden with `HOST` and `PORT` environment variables (defaults: `localhost`, `8080`).
+`dashboard.py` serves a single-page dashboard on `localhost:8080` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering and a date-range dropdown with bookmarkable URLs. A sticky section nav jumps between sections, and every chart/table can be collapsed (remembered across reloads). The bind address and port can be configured with the `--host` and `--port` flags, or the `HOST` and `PORT` environment variables (defaults: `localhost`, `8080`).
 
 ---
 
@@ -252,7 +266,7 @@ See [vscode-extension/README.md](vscode-extension/README.md) for settings, comma
 | `auth.py` | Access-key lifecycle + request authentication (team mode) |
 | `team_server.py` | Team aggregation server: ingest, admin/manager endpoints, UI |
 | `agent.py` | Team-mode client: scan + push metrics to the server |
-| `Formula/claude-usage.rb` | Homebrew formula — install with `brew install --formula <raw-url>` |
+| `Formula/claude-usage.rb` | Homebrew formula — install with `brew tap phuryn/claude-usage` then `brew install phuryn/claude-usage/claude-usage` |
 | `vscode-extension/` | VS Code extension — embeds the dashboard inside VS Code |
 | `Dockerfile` | Container image definition |
 | `scripts/run-docker.sh` | Build and run the dashboard in Docker with a read-only `~/.claude` mount |

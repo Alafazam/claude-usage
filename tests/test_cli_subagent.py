@@ -64,5 +64,56 @@ class TestCliSubagentLines(unittest.TestCase):
         self.assertIn("Subagent tokens:", out)
 
 
+class TestCliReadCommandsMigrateOldSchema(unittest.TestCase):
+    """A DB created before the subagent columns existed must not crash the read
+    commands: require_db runs the idempotent init_db migration on open."""
+
+    def setUp(self):
+        import sqlite3
+        self.db_path = Path(tempfile.mkdtemp()) / "usage.db"
+        today_ts = date.today().isoformat() + "T10:00:00Z"
+        # Pre-migration schema: turns has no is_subagent/agent_id, and there is
+        # no `agents` table.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript("""
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT,
+                timestamp TEXT, model TEXT, input_tokens INTEGER,
+                output_tokens INTEGER, cache_read_tokens INTEGER,
+                cache_creation_tokens INTEGER, tool_name TEXT, cwd TEXT,
+                message_id TEXT);
+        """)
+        conn.execute(
+            "INSERT INTO turns (session_id, timestamp, model, input_tokens, "
+            "output_tokens, cache_read_tokens, cache_creation_tokens, message_id) "
+            "VALUES ('s1', ?, 'claude-opus-4-8', 100, 200, 0, 0, 'm1')",
+            (today_ts,))
+        conn.commit()
+        conn.close()
+        self._orig_db = cli.DB_PATH
+        cli.DB_PATH = self.db_path
+
+    def tearDown(self):
+        cli.DB_PATH = self._orig_db
+
+    def test_today_does_not_crash_on_old_schema(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli.cmd_today()
+        self.assertIn("Subagent tokens:", buf.getvalue())
+
+    def test_week_does_not_crash_on_old_schema(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli.cmd_week()
+        self.assertTrue(buf.getvalue())
+
+    def test_stats_does_not_crash_on_old_schema(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli.cmd_stats()
+        self.assertIn("Subagent turns:", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -146,6 +146,10 @@ class Extension {
       args: spawnArgs.args,
       url: probeUrl,
       output: this.toSink(),
+      // Cold start can be slow the first time: spawning Python, opening the DB,
+      // and (once, after upgrade) backfilling session topics across the whole
+      // history before /api/data answers. Give it 20s before giving up.
+      readinessTimeoutMs: 20_000,
     });
     this.server = manager;
     try {
@@ -154,10 +158,15 @@ class Extension {
     } catch (err) {
       const msg = `Failed to start dashboard: ${(err as Error).message}`;
       this.output.appendLine(msg);
-      this.sidebar.setStatus(msg);
-      vscode.window.showErrorMessage(msg);
+      this.sidebar.setError(msg);
       manager.dispose();
       if (this.server === manager) this.server = undefined;
+      // Offer a one-click retry (and log access) rather than making the user
+      // hunt for the command palette. The sidebar also shows a Retry button.
+      void vscode.window.showErrorMessage(msg, "Retry", "Show Logs").then((choice) => {
+        if (choice === "Retry") void this.openDashboard();
+        else if (choice === "Show Logs") this.output.show();
+      });
     }
   }
 

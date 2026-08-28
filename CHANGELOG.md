@@ -9,6 +9,55 @@
 - New CLI commands: `push` (scan + push once), `agent` (scan + push every 5 minutes), `team-server` (run the aggregation server), and `key create|list|revoke` (headless access-key management). Existing `scan`/`today`/`week`/`stats`/`dashboard` commands and the local DB are unchanged.
 - Manager dashboards surface adoption (active developers and a "who hasn't reported" nudge list), token volume over time, model mix, tool frequency, MCP-server usage, per-project breakdown, an activity-by-hour view, and a developer leaderboard with per-person drill-down. Cost is **API-equivalent only**.
 - Access-key creation lives in the team-server web UI (`/admin/keys`); a developer's declared email is verified against the access key's canonical email on every ingest, so no one can report as someone else. Optional SSO via a trusted reverse-proxy header (`CLAUDE_USAGE_AUTH_MODE=proxy`).
+## v1.5.5 — 2026-07-10
+
+### Dashboard
+
+- Added an **Est. Cost line overlay** to the Daily Token Usage chart — a legend-toggleable line on a dedicated right-hand axis, priced **per model before the daily aggregation** so multi-model days are costed correctly (#151, thanks @paulabenzar).
+- Fixed **"This Month"** (and the other calendar ranges) including the previous month's last day in UTC+ timezones: date-range bounds are now formatted from local calendar components instead of `toISOString()` (UTC). The same local-date helper is now used by `rangeIncludesToday`, so it can no longer disagree with the range bounds near UTC midnight (#151, thanks @paulabenzar).
+
+### Scanner / CLI
+
+- The `today`, `week`, and `stats` commands now run the idempotent schema migration when they open the database, so reading before the next `scan` no longer crashes with `sqlite3.OperationalError: no such column: is_subagent` on a database created before subagent tracking existed. The dashboard already did this; the CLI read path now matches (#153, thanks @iliaal).
+
+### Project / docs
+
+- Documented the `dashboard` command's `--host` / `--port` flags in the README and AGENTS.md — the flags already worked (and are shown in the built-in `USAGE` text) but only the `HOST` / `PORT` environment variables were documented (#150, thanks @subhamchbty).
+
+## v1.5.4 — 2026-07-01
+
+### Dashboard
+
+- Added a **Title** column to the Recent Sessions table (after Project) and its CSV export, showing Claude Code's own session title: a user-set `custom-title` takes priority over an AI-generated `ai-title`. Long titles wrap within the column (min width 160px). Sessions without a title record show a muted **Untitled** placeholder — there is no fallback to the first user message, so prompt text never leaks into the table (#147, thanks @arojunior).
+- The Recent Sessions **CSV export now includes full session IDs** (the table still shows the 8-char prefix for readability, but an 8-char prefix isn't useful in an export) (#147).
+
+### VS Code extension
+
+- The embedded dashboard now waits up to **20s** (was 10s) for the server to become ready on cold start — the one-time topic backfill can slow the first launch — and a failed start now offers a **Retry** button (both in the error notification and on the panel) instead of only pointing at the command palette (#147).
+
+### Scanner
+
+- The scanner now parses `custom-title` / `ai-title` transcript records into a new `sessions.topic` column (additive in-place migration; existing DBs upgrade without a rebuild). Titles are captured even when Claude Code appends them after the turns (picked up on the next incremental scan), and a title-only record can never create a token-less phantom session row (#147, thanks @arojunior).
+- On upgrading an existing database, the next scan runs a **one-time topic backfill**: it re-reads the title records already present in previously-scanned transcripts (which an incremental scan would otherwise skip) so old sessions get a Topic too, then records via a `schema_meta` flag that it's done so it never repeats. Only title records are read, so token totals are untouched (#147).
+
+## v1.5.3 — 2026-07-01
+
+### Packaging
+
+- Added a `pyproject.toml` so the tool installs with `uv tool install git+https://github.com/phuryn/claude-usage` (or `pipx install …`) — no clone needed (#144, thanks @jamesbraza). Packaging only: `[project.dependencies]` is empty so the tool stays stdlib-only at runtime, the version is read dynamically from `scanner.VERSION` (still the single source of truth), and the clone + `python cli.py` path is unchanged. The `cli.py` `__main__` block was lifted into a `main()` function to serve as the `claude-usage` console entry point.
+
+## v1.5.2 — 2026-07-01
+
+### Packaging
+
+- Bumped the Homebrew formula pin from v1.1.0's commit to the **v1.5.1** tag tarball, so `brew install` / `brew upgrade` now installs current sources instead of year-old ones. The in-tree formula must reference the *previous* release to keep its `sha256` computable (a self-pointing hash is uncomputable), so Homebrew tracks one release behind by design (#46).
+
+## v1.5.1 — 2026-07-01
+
+### Packaging
+
+- Fixed the Homebrew shim crashing at runtime with `python@3.13/bin/python3: No such file or directory`. Modern `python@3.x` kegs only ship the versioned `python3.13` in their `bin` (the unversioned `python3` symlink moved to `libexec/bin`), so the formula now execs `python3.13` directly (#46, thanks @adrianlungu and @Jeroendevr for reporting).
+- Fixed the Homebrew install instructions: Homebrew disabled installing a formula from an arbitrary raw URL, so the README now taps the repo first (`brew tap phuryn/claude-usage …` then `brew install phuryn/claude-usage/claude-usage`) (#46, thanks @adrianlungu).
 
 ## v1.5.0 — 2026-06-21
 

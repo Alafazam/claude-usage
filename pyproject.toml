@@ -1,0 +1,36 @@
+# Packaging metadata so the tool can be installed with `uv tool install` / `pipx`
+# without a clone (#144). This is packaging only — the tool stays stdlib-only at
+# runtime ([project.dependencies] is empty) and the clone + `python cli.py` path
+# is unaffected.
+#
+# The version is read dynamically from scanner.VERSION so it stays a single
+# source of truth (kept in lockstep with the CHANGELOG heading and the VS Code
+# extension's package.json by tests/test_version.py) — do NOT hardcode it here.
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-usage"
+dynamic = ["version"]
+description = "Token, cost, and session dashboard for Claude Code usage"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Paweł Huryn" }]
+keywords = ["claude", "claude-code", "usage", "tokens", "cost", "dashboard"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/phuryn/claude-usage"
+Issues = "https://github.com/phuryn/claude-usage/issues"
+
+[project.scripts]
+claude-usage = "cli:main"
+
+# Three top-level modules, no package directory — mirror the flat repo layout.
+[tool.setuptools]
+py-modules = ["cli", "scanner", "dashboard"]
+
+[tool.setuptools.dynamic]
+version = { attr = "scanner.VERSION" }

@@ -117,6 +117,18 @@ describe("renderHtml with null URL (status pane)", () => {
     expect(html).not.toContain("frame-src");
   });
 
+  it("offers a Retry button (invoking the open command) only when showRetry is set", () => {
+    const html = renderHtml(null, "Failed to start dashboard: timed out", NONCE, "", "", true);
+    expect(html).toContain('href="command:claudeUsage.open"');
+    expect(html).toContain("Retry");
+  });
+
+  it("does NOT show the Retry button during normal startup (showRetry defaults false)", () => {
+    const html = renderHtml(null, "Starting dashboard at http://127.0.0.1:8080/…", NONCE);
+    expect(html).not.toContain("command:claudeUsage.open");
+    expect(html).not.toContain("Retry");
+  });
+
   it("renders the logo and an img-src CSP when an icon URI is provided", () => {
     const html = renderHtml(null, "", NONCE, "https://host/icon.svg", "vscode-webview://abc");
     expect(html).toContain('class="logo"');

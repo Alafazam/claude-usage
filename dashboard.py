@@ -108,7 +108,7 @@ def get_dashboard_data(db_path=DB_PATH):
             session_id, project_name, first_timestamp, last_timestamp,
             total_input_tokens, total_output_tokens,
             total_cache_read, total_cache_creation, model, turn_count,
-            git_branch
+            git_branch, topic
         FROM sessions
         ORDER BY last_timestamp DESC
     """).fetchall()
@@ -122,9 +122,12 @@ def get_dashboard_data(db_path=DB_PATH):
         except Exception:
             duration_min = 0
         sessions_all.append({
-            "session_id":    r["session_id"][:8],
+            # Full id: the table truncates for display, but the CSV export
+            # needs the whole thing (an 8-char prefix isn't uniquely useful).
+            "session_id":    r["session_id"],
             "project":       r["project_name"] or "unknown",
             "branch":        r["git_branch"] or "",
+            "topic":         r["topic"] or "",
             "last":          (r["last_timestamp"] or "")[:16].replace("T", " "),
             "last_date":     (r["last_timestamp"] or "")[:10],
             "duration_min":  duration_min,
@@ -358,6 +361,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .cost-na { color: var(--muted); font-family: monospace; font-size: 11px; }
   .num { font-family: monospace; }
   .muted { color: var(--muted); }
+  .topic-cell { box-sizing: border-box; min-width: 160px; max-width: 260px; overflow-wrap: anywhere; font-size: 12px; color: var(--text); }
+  .untitled { color: var(--muted); font-style: italic; }
   .section-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
   .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .section-header .section-title { margin-bottom: 0; }
@@ -568,6 +573,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <thead><tr>
         <th>Session</th>
         <th>Project</th>
+        <th>Title</th>
         <th class="sortable" onclick="setSessionSort('last')">Last Active <span class="sort-icon" id="sort-icon-last"></span></th>
         <th class="sortable" onclick="setSessionSort('duration_min')">Duration <span class="sort-icon" id="sort-icon-duration_min"></span></th>
         <th>Model</th>
@@ -878,10 +884,16 @@ const RANGE_LABELS = { 'today': 'Today', 'week': 'This Week', 'month': 'This Mon
 const RANGE_TICKS  = { 'today': 1, 'week': 7, 'month': 15, 'prev-month': 15, '7d': 7, '30d': 15, '90d': 13, 'all': 12 };
 const VALID_RANGES = Object.keys(RANGE_LABELS);
 
+// Local calendar date as YYYY-MM-DD. NOT toISOString(), which formats in UTC and
+// shifts the day back in UTC+ timezones (that was the "This Month" bug, #151).
+function localISODate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
 function rangeIncludesToday(range) {
   if (range === 'all') return true;
   const { start, end } = getRangeBounds(range);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localISODate(new Date());
   if (start && today < start) return false;
   if (end && today > end) return false;
   return true;
@@ -890,7 +902,7 @@ function rangeIncludesToday(range) {
 function getRangeBounds(range) {
   if (range === 'all') return { start: null, end: null };
   const today = new Date();
-  const iso = d => d.toISOString().slice(0, 10);
+  const iso = localISODate;
   if (range === 'today') {
     const t = iso(today);
     return { start: t, end: t };
@@ -1166,12 +1178,13 @@ function applyFilter() {
   // Daily chart: aggregate by day
   const dailyMap = {};
   for (const r of filteredDaily) {
-    if (!dailyMap[r.day]) dailyMap[r.day] = { day: r.day, input: 0, output: 0, cache_read: 0, cache_creation: 0 };
+    if (!dailyMap[r.day]) dailyMap[r.day] = { day: r.day, input: 0, output: 0, cache_read: 0, cache_creation: 0, cost: 0 };
     const d = dailyMap[r.day];
     d.input          += r.input;
     d.output         += r.output;
     d.cache_read     += r.cache_read;
     d.cache_creation += r.cache_creation;
+    d.cost           += calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation);
   }
   const daily = Object.values(dailyMap).sort((a, b) => a.day.localeCompare(b.day));
 
@@ -1440,15 +1453,24 @@ function renderDailyChart(daily) {
         { label: 'Output',         hidden: hiddenSeries.daily.has('Output'),         data: daily.map(d => d.output),         backgroundColor: TOKEN_COLORS.output,         hoverBackgroundColor: TOKEN_HOVER.output,         stack: 'io',    yAxisID: 'y1' },
         { label: 'Cache Read',     hidden: hiddenSeries.daily.has('Cache Read'),     data: daily.map(d => d.cache_read),     backgroundColor: TOKEN_COLORS.cache_read,     hoverBackgroundColor: TOKEN_HOVER.cache_read,     stack: 'cache', yAxisID: 'y' },
         { label: 'Cache Creation', hidden: hiddenSeries.daily.has('Cache Creation'), data: daily.map(d => d.cache_creation), backgroundColor: TOKEN_COLORS.cache_creation, hoverBackgroundColor: TOKEN_HOVER.cache_creation, stack: 'cache', yAxisID: 'y' },
+        { type: 'line', label: 'Est. Cost', hidden: hiddenSeries.daily.has('Est. Cost'), data: daily.map(d => d.cost), borderColor: C.accent, backgroundColor: 'transparent', pointBackgroundColor: C.accent, pointRadius: 3, tension: 0.3, yAxisID: 'y2' },
       ]
     },
     options: {
       responsive: true, maintainAspectRatio: false, resizeDelay: 150,
-      plugins: { legend: { onClick: legendToggle('daily'), labels: { color: C.axis, boxWidth: 12 } } },
+      plugins: {
+        legend: { onClick: legendToggle('daily'), labels: { color: C.axis, boxWidth: 12 } },
+        tooltip: { callbacks: {
+          label: item => item.dataset.label === 'Est. Cost'
+            ? ` Est. Cost: ${fmtCost(item.raw)}`
+            : ` ${item.dataset.label}: ${fmt(item.raw)}`
+        }}
+      },
       scales: {
-        x: { ticks: { color: C.axis, maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: C.border } },
-        y:  { position: 'left',  ticks: { color: C.green, callback: v => fmt(v) }, grid: { color: C.border }, title: { display: true, text: 'Cache', color: C.green } },
-        y1: { position: 'right', ticks: { color: C.blue, callback: v => fmt(v) }, grid: { drawOnChartArea: false },    title: { display: true, text: 'Input / Output', color: C.blue } },
+        x:  { ticks: { color: C.axis, maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: C.border } },
+        y:  { position: 'left',  ticks: { color: C.green,  callback: v => fmt(v) },         grid: { color: C.border },          title: { display: true, text: 'Cache',         color: C.green } },
+        y1: { position: 'right', ticks: { color: C.blue,   callback: v => fmt(v) },         grid: { drawOnChartArea: false },    title: { display: true, text: 'Input / Output', color: C.blue } },
+        y2: { position: 'right', ticks: { color: C.accent, callback: v => '$' + v.toFixed(2) }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Est. Cost', color: C.accent }, offset: true },
       }
     }
   });
@@ -1635,9 +1657,13 @@ function renderSessionsTable(sessions) {
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
+    const titleCell = s.topic
+      ? `<td class="topic-cell" title="${esc(s.topic)}">${esc(s.topic)}</td>`
+      : `<td class="topic-cell"><span class="untitled">Untitled</span></td>`;
     return `<tr>
-      <td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>
+      <td class="muted" style="font-family:monospace">${esc(s.session_id.slice(0, 8))}&hellip;</td>
       <td>${esc(s.project)}</td>
+      ${titleCell}
       <td class="muted">${esc(s.last)}</td>
       <td class="muted">${esc(s.duration_min)}m</td>
       <td><span class="model-tag">${esc(s.model)}</span></td>
@@ -1837,10 +1863,10 @@ function exportModelCSV() {
 }
 
 function exportSessionsCSV() {
-  const header = ['Session', 'Project', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
+  const header = ['Session', 'Project', 'Title', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
   const rows = lastFilteredSessions.map(s => {
     const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
-    return [s.session_id, s.project, s.last, s.duration_min, s.model, s.turns, s.input, s.output, s.cache_read, s.cache_creation, cost.toFixed(4)];
+    return [s.session_id, s.project, s.topic, s.last, s.duration_min, s.model, s.turns, s.input, s.output, s.cache_read, s.cache_creation, cost.toFixed(4)];
   });
   downloadCSV('sessions', header, rows);
 }
